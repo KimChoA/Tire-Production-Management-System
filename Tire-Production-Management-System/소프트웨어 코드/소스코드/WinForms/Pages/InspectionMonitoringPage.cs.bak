@@ -1,0 +1,278 @@
+using System.Net.Http;
+using TireEquipmentHMI.Theme;
+
+namespace TireEquipmentHMI.Pages;
+
+// 상단 YOLO / 측면 OpenCV의 영상은 동일한 Raspberry Pi HTTP 서버에서 가져옵니다.
+// 영상 연결 실패는 OK/NG 판정과 별개로 표시합니다.
+public sealed class InspectionMonitoringPage : UserControl
+{
+    public PictureBox picCamera = new(); // 기존 외부 참조 호환: 상단 카메라
+    public PictureBox picSideCamera = new();
+    public Label lblTireId = new();
+    public Label lblResult = new();
+    public Label lblInspectionStatus = new();
+    public DataGridView gridRecentInspections = new();
+
+    private readonly Label topStatus = new();
+    private readonly Label sideStatus = new();
+    private readonly HttpClient cameraClient = new() { Timeout = TimeSpan.FromSeconds(3) };
+    private CancellationTokenSource? cameraCancellation;
+    private string cameraBaseUrl = "http://127.0.0.1:5001";
+
+    public InspectionMonitoringPage()
+    {
+        BackColor = UiTheme.PageBg;
+        BuildUi();
+        LoadCameraConfig();
+        HandleCreated += (_, _) => StartCameras();
+        Disposed += (_, _) => { cameraCancellation?.Cancel(); cameraClient.Dispose(); };
+    }
+
+    private void LoadCameraConfig()
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "camera_config.json");
+            if (!File.Exists(path)) return;
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.TryGetProperty("CameraBaseUrl", out var url))
+                cameraBaseUrl = url.GetString()?.TrimEnd('/') ?? cameraBaseUrl;
+        }
+        catch { /* 설정 오류는 카메라 상태 표시로 진단 */ }
+    }
+
+    private void StartCameras()
+    {
+        if (cameraCancellation != null) return;
+        cameraCancellation = new CancellationTokenSource();
+        _ = PollCameraAsync("top", picCamera, topStatus, cameraCancellation.Token);
+        _ = PollCameraAsync("side", picSideCamera, sideStatus, cameraCancellation.Token);
+    }
+
+    private async Task PollCameraAsync(string camera, PictureBox picture, Label status, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            try
+            {
+                var bytes = await cameraClient.GetByteArrayAsync(
+                    $"{cameraBaseUrl}/snapshot/{camera}", token);
+                using var ms = new MemoryStream(bytes);
+                using var decoded = Image.FromStream(ms);
+                var next = new Bitmap(decoded);
+                if (picture.IsDisposed) { next.Dispose(); break; }
+                picture.BeginInvoke((Action)(() =>
+                {
+                    if (picture.IsDisposed) { next.Dispose(); return; }
+                    var old = picture.Image;
+                    picture.Image = next;
+                    old?.Dispose();
+                    status.Text = "● LIVE";
+                    status.ForeColor = UiTheme.Success;
+                }));
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
+            catch
+            {
+                if (status.IsHandleCreated && !status.IsDisposed)
+                    status.BeginInvoke((Action)(() =>
+                    {
+                        if (status.IsDisposed) return;
+                        status.Text = "● 연결 대기 / 카메라 확인";
+                        status.ForeColor = UiTheme.Danger;
+                    }));
+            }
+            try { await Task.Delay(250, token); }
+            catch (OperationCanceledException) { break; }
+        }
+    }
+
+    // The server provides URL-escaped fields (time|tire_id|result|type|detail).
+    // UI rows are replaced, not appended, so reconnects do not double count.
+    private static string DisplayDefectType(string code)
+    {
+        return code.Trim().ToUpperInvariant() switch
+        {
+            "WRONG_TIRE" or "NG_WRONG_TIRE" => "이종 타이어(B형)",
+            "WHEEL_DAMAGE" => "휠 손상",
+            "TIRE_DAMAGE" => "타이어 손상",
+            "BOTH_DAMAGE" => "타이어·휠 복합 손상",
+            "" => "불량 유형 미확인",
+            _ => code
+        };
+    }
+    public void DisplayRealInspectionHistory(string encodedRows)
+    {
+        if (IsDisposed) return;
+        gridRecentInspections.Rows.Clear();
+        string[] lines = encodedRows.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        int count = 0;
+        foreach (string line in lines)
+        {
+            string[] items = line.Split('|');
+            if (items.Length != 5) continue;
+            string[] decoded;
+            try { decoded = items.Select(Uri.UnescapeDataString).ToArray(); }
+            catch { continue; }
+            gridRecentInspections.Rows.Add(decoded[0], decoded[1], decoded[2],
+                decoded[2] == "NG" ? DisplayDefectType(decoded[3]) + (string.IsNullOrWhiteSpace(decoded[4]) ? "" : " / " + decoded[4]) : "정상");
+            if (++count >= 50) break;
+        }
+        if (gridRecentInspections.Rows.Count > 0)
+        {
+            var latest = gridRecentInspections.Rows[0];
+            string verdict = Convert.ToString(latest.Cells[2].Value) ?? "";
+            lblTireId.Text = "Tire ID : " + Convert.ToString(latest.Cells[1].Value);
+            lblResult.Text = "Result : " + verdict;
+            lblResult.ForeColor = verdict == "OK" ? UiTheme.Success : UiTheme.Danger;
+            lblInspectionStatus.Text = "Status : " + Convert.ToString(latest.Cells[3].Value);
+        }
+        else
+        {
+            lblTireId.Text = "Tire ID : --";
+            lblResult.Text = "Result : --";
+            lblInspectionStatus.Text = "Status : 실검사 데이터 대기";
+        }
+    }
+
+    private void BuildUi()
+    {
+        var scrollHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            BackColor = UiTheme.PageBg
+        };
+        var main = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 840,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = UiTheme.PageBg,
+            Padding = new Padding(0)
+        };
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 450));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 125));
+        main.RowStyles.Add(new RowStyle(SizeType.Absolute, 265));
+
+        var cameras = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+        cameras.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        cameras.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        cameras.Controls.Add(BuildCameraCard("상단 카메라 · YOLO", out picCamera, topStatus), 0, 0);
+        cameras.Controls.Add(BuildCameraCard("측면 카메라 · OpenCV", out picSideCamera, sideStatus), 1, 0);
+        main.Controls.Add(cameras, 0, 0);
+        main.Controls.Add(BuildResultCard(), 0, 1);
+        main.Controls.Add(BuildRecentCard(), 0, 2);
+        scrollHost.Controls.Add(main);
+        scrollHost.Resize += (_, _) =>
+        {
+            int width = scrollHost.ClientSize.Width - (scrollHost.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0);
+            main.Width = Math.Max(420, width);
+        };
+        Controls.Add(scrollHost);
+    }
+
+    private static Control BuildCameraCard(string title, out PictureBox picture, Label status)
+    {
+        var card = new ModernCardPanel { Dock = DockStyle.Fill, Padding = new Padding(16) };
+        var header = new TableLayoutPanel { Dock = DockStyle.Top, Height = 34, ColumnCount = 2 };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+        header.Controls.Add(new Label
+        {
+            Text = title,
+            Dock = DockStyle.Fill,
+            Font = new Font("맑은 고딕", 11F, FontStyle.Bold),
+            ForeColor = UiTheme.Text,
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+        status.Text = "● 연결 대기";
+        status.Dock = DockStyle.Fill;
+        status.TextAlign = ContentAlignment.MiddleRight;
+        status.ForeColor = UiTheme.Muted;
+        status.Font = new Font("맑은 고딕", 8F);
+        header.Controls.Add(status, 1, 0);
+        picture = new PictureBox
+        {
+            Dock = DockStyle.Fill,
+            SizeMode = PictureBoxSizeMode.Zoom,
+            BackColor = Color.FromArgb(24, 39, 57)
+        };
+        // out 매개 변수는 람다에서 직접 캡처할 수 없으므로 지역 변수에 보관합니다.
+        PictureBox cameraPicture = picture;
+        cameraPicture.Paint += (_, e) =>
+        {
+            if (cameraPicture.Image != null) return;
+            using var titleFont = new Font("Segoe UI", 14F, FontStyle.Bold);
+            using var subFont = new Font("맑은 고딕", 10F);
+            using var titleBrush = new SolidBrush(Color.FromArgb(219, 230, 244));
+            using var subBrush = new SolidBrush(Color.FromArgb(149, 170, 194));
+            var area = cameraPicture.ClientRectangle;
+            var titleText = title.Contains("YOLO") ? "TOP CAMERA 01" : "SIDE CAMERA 02";
+            var titleSize = e.Graphics.MeasureString(titleText, titleFont);
+            e.Graphics.DrawString(titleText, titleFont, titleBrush,
+                (area.Width - titleSize.Width) / 2, area.Height / 2 - 24);
+            var subtitle = "영상 연결 대기";
+            var subSize = e.Graphics.MeasureString(subtitle, subFont);
+            e.Graphics.DrawString(subtitle, subFont, subBrush,
+                (area.Width - subSize.Width) / 2, area.Height / 2 + 12);
+        };
+        card.Controls.Add(picture);
+        card.Controls.Add(header);
+        return card;
+    }
+
+    private Control BuildResultCard()
+    {
+        var card = new ModernCardPanel { Dock = DockStyle.Fill, Padding = new Padding(16) };
+        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 2 };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var heading = new Label { Text = "현재 타이어 검사 결과", Font = new Font("맑은 고딕", 11F, FontStyle.Bold), ForeColor = UiTheme.Text, Dock = DockStyle.Fill };
+        panel.Controls.Add(heading, 0, 0); panel.SetColumnSpan(heading, 3);
+        lblTireId = ResultLabel("Tire ID : --");
+        lblResult = ResultLabel("Result : --");
+        lblInspectionStatus = ResultLabel("Status : --");
+        panel.Controls.Add(lblTireId, 0, 1);
+        panel.Controls.Add(lblResult, 1, 1);
+        panel.Controls.Add(lblInspectionStatus, 2, 1);
+        card.Controls.Add(panel);
+        return card;
+    }
+
+    private static Label ResultLabel(string value) => new()
+    {
+        Text = value,
+        Dock = DockStyle.Fill,
+        TextAlign = ContentAlignment.MiddleLeft,
+        Font = new Font("맑은 고딕", 11F, FontStyle.Bold),
+        ForeColor = UiTheme.Text,
+        AutoEllipsis = true
+    };
+
+    private Control BuildRecentCard()
+    {
+        var card = new ModernCardPanel { Dock = DockStyle.Fill, Padding = new Padding(16) };
+        var heading = new Label { Text = "최근 검사 결과", Dock = DockStyle.Top, Height = 34, Font = new Font("맑은 고딕", 11F, FontStyle.Bold), ForeColor = UiTheme.Text };
+        gridRecentInspections = new DataGridView
+        {
+            Dock = DockStyle.Fill,
+            ReadOnly = true,
+            AllowUserToAddRows = false,
+            AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+        };
+        gridRecentInspections.Columns.Add("time", "시간");
+        gridRecentInspections.Columns.Add("id", "검사 ID");
+        gridRecentInspections.Columns.Add("result", "최종 판정");
+        gridRecentInspections.Columns.Add("status", "불량 유형 / 상세");
+        UiFactory.StyleGrid(gridRecentInspections);
+        card.Controls.Add(gridRecentInspections);
+        card.Controls.Add(heading);
+        return card;
+    }
+}

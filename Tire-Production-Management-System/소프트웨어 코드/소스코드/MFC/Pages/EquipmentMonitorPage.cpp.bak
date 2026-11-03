@@ -1,0 +1,1076 @@
+
+#include "pch.h"
+#include "EquipmentMonitorPage.h"
+
+#include <cstdlib>
+#include <winhttp.h>
+#include <memory>
+#pragma comment(lib, "winhttp.lib")
+
+namespace
+{
+    constexpr UINT EquipmentFilter = 3101;
+    constexpr UINT LevelFilter = 3102;
+    constexpr UINT Scenario = 3103;
+    constexpr UINT ApplyScenario = 3104;
+    constexpr UINT LogList = 3105;
+    constexpr UINT WM_CAMERA_FRAME = WM_APP + 433;
+
+    constexpr size_t MaxEvents = 1000;
+
+    inline int MaxInt(int a, int b) { return a > b ? a : b; }
+    inline int MinInt(int a, int b) { return a < b ? a : b; }
+
+    const COLORREF Navy = RGB(31, 53, 78);
+    const COLORREF Muted = RGB(112, 130, 151);
+    const COLORREF Blue = RGB(61, 145, 218);
+    const COLORREF Border = RGB(221, 231, 241);
+    const COLORREF White = RGB(255, 255, 255);
+    const COLORREF CameraBg = RGB(25, 42, 62);
+    const COLORREF CameraText = RGB(195, 211, 229);
+
+    const LPCTSTR Names[] =
+    {
+        _T("Conveyor"),
+        _T("Camera"),
+        _T("검사 판정"),
+        _T("Servo"),
+        _T("Raspberry Pi"),
+        _T("TCP/IP"),
+        _T("LED / Buzzer"),
+        _T("운전 모드")
+    };
+}
+
+BEGIN_MESSAGE_MAP(CEquipmentMonitorPage, CBasePage)
+    ON_WM_PAINT()
+    ON_MESSAGE(WM_CAMERA_FRAME, &CEquipmentMonitorPage::OnCameraFrame)
+    ON_WM_SIZE()
+    ON_WM_VSCROLL()
+    ON_WM_MOUSEWHEEL()
+
+    ON_BN_CLICKED(
+        ApplyScenario,
+        &CEquipmentMonitorPage::OnApplyScenario)
+
+    ON_CBN_SELCHANGE(
+        EquipmentFilter,
+        &CEquipmentMonitorPage::OnFilterChanged)
+
+    ON_CBN_SELCHANGE(
+        LevelFilter,
+        &CEquipmentMonitorPage::OnFilterChanged)
+
+    ON_NOTIFY(
+        NM_CUSTOMDRAW,
+        LogList,
+        &CEquipmentMonitorPage::OnLogCustomDraw)
+
+    ON_NOTIFY(
+        NM_DBLCLK,
+        LogList,
+        &CEquipmentMonitorPage::OnLogDoubleClick)
+END_MESSAGE_MAP()
+
+BOOL CEquipmentMonitorPage::CreatePage(
+    CWnd* p,
+    const CRect& r,
+    UINT id)
+{
+    if (!CBasePage::CreatePage(p, r, id))
+        return FALSE;
+
+    // 세로 스크롤바 활성화
+    ModifyStyle(0, WS_VSCROLL);
+
+    AddTitle(_T("설비 모니터링"));
+
+    AddLabel(
+        _T("DUAL CAMERA MONITORING"),
+        28, 57, 400, 20);
+
+    // 상단/측면 카메라를 좌우로 배치 (각 452 x 500)
+    // 아래쪽에 설비 상태, 가상 상황, 이벤트 로그 배치
+
+    AddLabel(
+        _T("EQUIPMENT STATUS  |  설비 상태"),
+        28, 612, 500, 28);
+
+    // 설비 상태 카드 8개
+    for (int i = 0; i < 8; ++i)
+    {
+        const int x = 28 + (i % 4) * 234;
+        const int y = 653 + (i / 4) * 115;
+
+        m_states[i] = _T("미확인");
+
+        m_cards[i].CreateCard(
+            CString(Names[i]) + _T("\r\n미확인"),
+            this,
+            CRect(x, y, x + 220, y + 102));
+    }
+
+    // 가상 상황 선택
+    AddLabel(
+        _T("가상 상황"),
+        28, 920, 90, 26);
+
+    m_scenario.Create(
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+        CBS_DROPDOWNLIST | WS_VSCROLL,
+        CRect(112, 912, 382, 1130),
+        this,
+        Scenario);
+
+    const LPCTSTR scenarios[] =
+    {
+        _T("연결 / 대기"),
+        _T("자동 운전 시작"),
+        _T("검사 재확인"),
+        _T("불량품 배출"),
+        _T("카메라 오류"),
+        _T("통신 끊김"),
+        _T("정상 복구 / 정지")
+    };
+
+    for (auto s : scenarios)
+        m_scenario.AddString(s);
+
+    m_scenario.SetCurSel(0);
+    m_scenario.SetFont(&m_normalFont);
+
+    m_apply.Create(
+        _T("가상 신호 적용"),
+        WS_CHILD | WS_VISIBLE |
+        WS_TABSTOP | BS_OWNERDRAW,
+        CRect(396, 910, 554, 950),
+        this,
+        ApplyScenario);
+
+    m_apply.SetFont(&m_labelFont);
+
+    m_lastReceived.Create(
+        _T("최근 수신: --"),
+        WS_CHILD | WS_VISIBLE,
+        CRect(572, 920, 950, 948),
+        this);
+
+    m_lastReceived.SetFont(&m_normalFont);
+
+    // 이벤트 로그
+    AddLabel(
+        _T("EVENT LOG  |  설비 이벤트"),
+        28, 1000, 400, 28);
+
+    AddLabel(
+        _T("설비"),
+        28, 1047, 55, 26);
+
+    m_equipmentFilter.Create(
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+        CBS_DROPDOWNLIST | WS_VSCROLL,
+        CRect(84, 1040, 274, 1260),
+        this,
+        EquipmentFilter);
+
+    m_equipmentFilter.AddString(_T("전체"));
+
+    for (auto name : Names)
+        m_equipmentFilter.AddString(name);
+
+    m_equipmentFilter.SetCurSel(0);
+    m_equipmentFilter.SetFont(&m_normalFont);
+
+    AddLabel(
+        _T("등급"),
+        294, 1047, 55, 26);
+
+    m_levelFilter.Create(
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+        CBS_DROPDOWNLIST | WS_VSCROLL,
+        CRect(350, 1040, 480, 1230),
+        this,
+        LevelFilter);
+
+    const LPCTSTR levels[] =
+    {
+        _T("전체"),
+        _T("INFO"),
+        _T("WARN"),
+        _T("ERROR")
+    };
+
+    for (auto level : levels)
+        m_levelFilter.AddString(level);
+
+    m_levelFilter.SetCurSel(0);
+    m_levelFilter.SetFont(&m_normalFont);
+
+    m_count.Create(
+        _T(""),
+        WS_CHILD | WS_VISIBLE,
+        CRect(500, 1047, 950, 1075),
+        this);
+
+    m_count.SetFont(&m_normalFont);
+
+    m_log.Create(
+        WS_CHILD | WS_VISIBLE | WS_BORDER |
+        LVS_REPORT | LVS_SINGLESEL,
+        CRect(28, 1100, 950, 1480),
+        this,
+        LogList);
+
+    m_log.SetExtendedStyle(
+        LVS_EX_FULLROWSELECT |
+        LVS_EX_GRIDLINES |
+        LVS_EX_DOUBLEBUFFER);
+
+    m_log.SetFont(&m_normalFont);
+    m_log.SetBkColor(White);
+    m_log.SetTextBkColor(White);
+    m_log.SetTextColor(Navy);
+
+    m_log.InsertColumn(
+        0, _T("발생 시간"),
+        LVCFMT_LEFT, 170);
+
+    m_log.InsertColumn(
+        1, _T("설비"),
+        LVCFMT_LEFT, 140);
+
+    m_log.InsertColumn(
+        2, _T("등급"),
+        LVCFMT_CENTER, 90);
+
+    m_log.InsertColumn(
+        3, _T("이벤트 상세 내용"),
+        LVCFMT_LEFT, 485);
+
+    RefreshLog();
+    UpdateScrollBar();
+    StartCameraWorker();
+
+    return TRUE;
+}
+
+// 카메라 대기 화면
+void CEquipmentMonitorPage::DrawCameraPanel(
+    CDC& dc,
+    const CRect& rect,
+    const CString& title,
+    const CString& method,
+    const CString& cameraName)
+{
+    CBrush whiteBrush(White);
+    CPen borderPen(PS_SOLID, 1, Border);
+
+    CBrush* oldBrush = dc.SelectObject(&whiteBrush);
+    CPen* oldPen = dc.SelectObject(&borderPen);
+
+    dc.RoundRect(
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        16,
+        16);
+
+    dc.SelectObject(oldBrush);
+    dc.SelectObject(oldPen);
+
+    CRect titleRect(
+        rect.left + 18,
+        rect.top + 10,
+        rect.right - 120,
+        rect.top + 36);
+
+    dc.SetTextColor(Navy);
+
+    dc.DrawText(
+        title,
+        &titleRect,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+
+    CRect methodRect(
+        rect.right - 110,
+        rect.top + 10,
+        rect.right - 18,
+        rect.top + 36);
+
+    dc.SetTextColor(Blue);
+
+    dc.DrawText(
+        method,
+        &methodRect,
+        DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+
+    // 확대된 영상 영역
+    CRect screen(
+        rect.left + 12,
+        rect.top + 43,
+        rect.right - 12,
+        rect.bottom - 12);
+
+    dc.FillSolidRect(&screen, CameraBg);
+
+    CImage& preview = (method.CompareNoCase(_T("YOLO")) == 0)
+        ? m_topImage
+        : m_sideImage;
+    if (!preview.IsNull())
+    {
+        const int imageW = preview.GetWidth();
+        const int imageH = preview.GetHeight();
+
+        if (imageW > 0 && imageH > 0)
+        {
+            const double scale = min(
+                static_cast<double>(screen.Width()) / imageW,
+                static_cast<double>(screen.Height()) / imageH
+            );
+
+            const int drawW = static_cast<int>(imageW * scale);
+            const int drawH = static_cast<int>(imageH * scale);
+
+            const int drawX = screen.left +
+                (screen.Width() - drawW) / 2;
+
+            const int drawY = screen.top +
+                (screen.Height() - drawH) / 2;
+
+            SetStretchBltMode(dc.GetSafeHdc(), HALFTONE);
+
+            preview.Draw(
+                dc.GetSafeHdc(),
+                drawX,
+                drawY,
+                drawW,
+                drawH
+            );
+
+            return;
+        }
+    }
+
+    const int cx = screen.CenterPoint().x;
+    const int cy = screen.CenterPoint().y - 25;
+
+    CPen cameraPen(
+        PS_SOLID,
+        2,
+        RGB(145, 174, 204));
+
+    CPen* oldCameraPen = dc.SelectObject(&cameraPen);
+
+    CBrush* oldCameraBrush =
+        static_cast<CBrush*>(
+            dc.SelectStockObject(NULL_BRUSH));
+
+    dc.RoundRect(
+        cx - 22, cy - 13,
+        cx + 14, cy + 13,
+        5, 5);
+
+    POINT lens[3] =
+    {
+        {cx + 14, cy - 7},
+        {cx + 28, cy - 13},
+        {cx + 28, cy + 13}
+    };
+
+    dc.Polyline(lens, 3);
+    dc.MoveTo(cx + 28, cy + 13);
+    dc.LineTo(cx + 14, cy + 7);
+
+    dc.SelectObject(oldCameraBrush);
+    dc.SelectObject(oldCameraPen);
+
+    dc.SetTextColor(CameraText);
+
+    CRect nameRect(
+        screen.left + 8,
+        cy + 30,
+        screen.right - 8,
+        cy + 55);
+
+    dc.DrawText(
+        cameraName,
+        &nameRect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+    CRect waitRect(
+        screen.left + 8,
+        cy + 57,
+        screen.right - 8,
+        cy + 82);
+
+    dc.DrawText(
+        _T("영상 연결 대기"),
+        &waitRect,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+}
+
+// 카메라 및 배경 그리기
+
+CEquipmentMonitorPage::~CEquipmentMonitorPage()
+{
+    m_cameraStop.store(true);
+    if (m_cameraWorker.joinable())
+        m_cameraWorker.join();
+    m_topImage.Destroy();
+    m_sideImage.Destroy();
+}
+
+// Download from Pi on a WORKER thread (1.5s timeouts), never block UI painting.
+namespace
+{
+    bool FetchJpeg(const CString& url, const CString& destination)
+    {
+        URL_COMPONENTS parts = {};
+        parts.dwStructSize = sizeof(parts);
+        WCHAR host[256] = {};
+        WCHAR path[512] = {};
+        parts.lpszHostName = host;
+        parts.dwHostNameLength = _countof(host);
+        parts.lpszUrlPath = path;
+        parts.dwUrlPathLength = _countof(path);
+        if (!WinHttpCrackUrl(url.GetString(), 0, 0, &parts)) return false;
+        if (parts.nScheme != INTERNET_SCHEME_HTTP) return false;
+
+        HINTERNET session = WinHttpOpen(L"TireMFC/1.0",
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+            WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!session) return false;
+        WinHttpSetTimeouts(session, 1000, 1200, 1200, 1200);
+        HINTERNET server = WinHttpConnect(session, host, parts.nPort, 0);
+        HINTERNET req = server ? WinHttpOpenRequest(server, L"GET", path,
+            nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0) : nullptr;
+        bool ok = false;
+        if (req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(req, nullptr))
+        {
+            DWORD status=0, len=sizeof(status);
+            if (WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                    nullptr, &status, &len, nullptr) && status==200)
+            {
+                CFile file;
+                if (file.Open(destination, CFile::modeCreate | CFile::modeWrite | CFile::typeBinary))
+                {
+                    DWORD avail=0;
+                    BYTE buffer[8192];
+                    ok=true;
+                    do {
+                        if (!WinHttpQueryDataAvailable(req, &avail)) {ok=false;break;}
+                        if (avail==0)break;
+                        while(avail>0) {
+                            DWORD want = avail < sizeof(buffer) ? avail : sizeof(buffer);
+                            DWORD read=0;
+                            if (!WinHttpReadData(req,buffer,want,&read) || read==0) {ok=false;break;}
+                            file.Write(buffer, read);
+                            avail-=read;
+                        }
+                        if(!ok)break;
+                    } while(true);
+                    file.Close();
+                }
+            }
+        }
+        if (req)WinHttpCloseHandle(req);
+        if (server)WinHttpCloseHandle(server);
+        WinHttpCloseHandle(session);
+        return ok;
+    }
+}
+
+void CEquipmentMonitorPage::StartCameraWorker()
+{
+    if (m_cameraWorker.joinable()) return;
+    TCHAR module[MAX_PATH]={};
+    GetModuleFileName(nullptr,module,MAX_PATH);
+    CString ini(module);
+    int pos=ini.ReverseFind(_T('\\'));
+    if(pos>=0)ini=ini.Left(pos+1);
+    ini+=_T("client_config.ini");
+    TCHAR address[256]={};
+    GetPrivateProfileString(_T("CAMERA"),_T("URL"),
+        _T("http://192.168.0.209:5001"),address,_countof(address),ini);
+    m_cameraBaseUrl = address;
+    m_cameraBaseUrl.TrimRight(_T("/"));
+    m_cameraStop.store(false);
+    HWND hwnd=GetSafeHwnd();
+    CString base=m_cameraBaseUrl;
+    m_cameraWorker=std::thread([this,hwnd,base]() {
+        TCHAR temp[MAX_PATH]={};GetTempPath(MAX_PATH,temp);
+        unsigned n=0;
+        while(!m_cameraStop.load()) {
+            for (int i=0;i<2 && !m_cameraStop.load();++i) {
+                CString path;
+                path.Format(_T("%sTireCamera_%lu_%d_%u.jpg"),
+                    temp,GetCurrentProcessId(),i,n++);
+                CString url=base+(i==0?_T("/snapshot/top"):_T("/snapshot/side"));
+                if (FetchJpeg(url,path)) {
+                    CString* owned=new CString(path);
+                    if(!::PostMessage(hwnd,WM_CAMERA_FRAME,(WPARAM)i,(LPARAM)owned)) {
+                        delete owned;
+                        DeleteFile(path);
+                    }
+                } else DeleteFile(path);
+            }
+            for (int k = 0; k < 2 && !m_cameraStop.load(); ++k)
+                Sleep(100);
+        }
+    });
+}
+
+LRESULT CEquipmentMonitorPage::OnCameraFrame(WPARAM cameraIndex, LPARAM pathPointer)
+{
+    std::unique_ptr<CString> path(reinterpret_cast<CString*>(pathPointer));
+    if (!path) return 0;
+    CImage image;
+    HRESULT result=image.Load(*path);
+    DeleteFile(*path);
+    if (SUCCEEDED(result))
+    {
+        CImage& target = cameraIndex == 0 ? m_topImage : m_sideImage;
+
+        target.Destroy();
+        target.Attach(image.Detach());
+
+        CRect cameraRect;
+
+        if (cameraIndex == 0)
+            cameraRect.SetRect(40, 123, 468, 568);
+        else
+            cameraRect.SetRect(510, 123, 938, 568);
+
+        cameraRect.OffsetRect(0, -m_scrollY);
+
+        InvalidateRect(&cameraRect, FALSE);
+    }
+    return 0;
+}
+
+void CEquipmentMonitorPage::OnPaint()
+{
+    CPaintDC dc(this);
+
+    dc.SetBkMode(TRANSPARENT);
+
+    // 화면을 스크롤 위치만큼 이동
+    const CPoint oldOrigin =
+        dc.SetViewportOrg(0, -m_scrollY);
+
+    CFont* oldFont =
+        dc.SelectObject(&m_normalFont);
+
+    DrawCameraPanel(
+        dc,
+        CRect(28, 80, 480, 580),
+        _T("상단 카메라"),
+        _T("YOLO"),
+        _T("TOP CAMERA 01"));
+
+    DrawCameraPanel(
+        dc,
+        CRect(498, 80, 950, 580),
+        _T("측면 카메라"),
+        _T("OpenCV"),
+        _T("SIDE CAMERA 02"));
+
+    dc.SelectObject(oldFont);
+    dc.SetViewportOrg(oldOrigin);
+}
+
+// 스크롤 범위 갱신
+void CEquipmentMonitorPage::UpdateScrollBar()
+{
+    if (!GetSafeHwnd())
+        return;
+
+    CRect client;
+    GetClientRect(&client);
+
+    const int pageHeight =
+        MaxInt(1, client.Height());
+
+    const int maxScroll =
+        MaxInt(0, ContentHeight - pageHeight);
+
+    m_scrollY =
+        MinInt(m_scrollY, maxScroll);
+
+    SCROLLINFO si = {};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0;
+    si.nMax = ContentHeight - 1;
+    si.nPage = static_cast<UINT>(pageHeight);
+    si.nPos = m_scrollY;
+
+    SetScrollInfo(SB_VERT, &si, TRUE);
+}
+
+// 스크롤 이동
+void CEquipmentMonitorPage::ScrollTo(int position)
+{
+    if (!GetSafeHwnd())
+        return;
+
+    CRect client;
+    GetClientRect(&client);
+
+    const int maxScroll =
+        MaxInt(0, ContentHeight - client.Height());
+
+    const int target =
+        MaxInt(0, MinInt(position, maxScroll));
+
+    if (target == m_scrollY)
+        return;
+
+    const int delta = m_scrollY - target;
+
+    m_scrollY = target;
+
+    // 자식 컨트롤도 함께 이동
+    ScrollWindowEx(
+        0,
+        delta,
+        nullptr,
+        nullptr,
+        nullptr,
+        nullptr,
+        SW_SCROLLCHILDREN |
+        SW_INVALIDATE |
+        SW_ERASE);
+
+    SetScrollPos(SB_VERT, m_scrollY, TRUE);
+    RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+// 창 크기 변경
+void CEquipmentMonitorPage::OnSize(
+    UINT nType,
+    int cx,
+    int cy)
+{
+    CBasePage::OnSize(nType, cx, cy);
+
+    if (!GetSafeHwnd() || cx <= 0 || cy <= 0)
+        return;
+
+    const int maxScroll =
+        MaxInt(0, ContentHeight - cy);
+
+    if (m_scrollY > maxScroll)
+    {
+        const int delta = m_scrollY - maxScroll;
+        m_scrollY = maxScroll;
+
+        ScrollWindowEx(
+            0,
+            delta,
+            nullptr,
+            nullptr,
+            nullptr,
+            nullptr,
+            SW_SCROLLCHILDREN |
+            SW_INVALIDATE |
+            SW_ERASE);
+
+        Invalidate(FALSE);
+    }
+
+    UpdateScrollBar();
+}
+
+// 스크롤바 이벤트
+void CEquipmentMonitorPage::OnVScroll(
+    UINT nSBCode,
+    UINT nPos,
+    CScrollBar* pScrollBar)
+{
+    if (pScrollBar != nullptr)
+    {
+        CBasePage::OnVScroll(
+            nSBCode,
+            nPos,
+            pScrollBar);
+        return;
+    }
+
+    CRect client;
+    GetClientRect(&client);
+
+    int target = m_scrollY;
+
+    switch (nSBCode)
+    {
+    case SB_LINEUP:
+        target -= 45;
+        break;
+
+    case SB_LINEDOWN:
+        target += 45;
+        break;
+
+    case SB_PAGEUP:
+        target -= client.Height();
+        break;
+
+    case SB_PAGEDOWN:
+        target += client.Height();
+        break;
+
+    case SB_TOP:
+        target = 0;
+        break;
+
+    case SB_BOTTOM:
+        target = ContentHeight;
+        break;
+
+    case SB_THUMBTRACK:
+    case SB_THUMBPOSITION:
+    {
+        SCROLLINFO si = {};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_TRACKPOS;
+
+        GetScrollInfo(SB_VERT, &si);
+        target = si.nTrackPos;
+        break;
+    }
+
+    default:
+        return;
+    }
+
+    ScrollTo(target);
+}
+
+// 마우스 휠 스크롤
+BOOL CEquipmentMonitorPage::OnMouseWheel(
+    UINT nFlags,
+    short zDelta,
+    CPoint pt)
+{
+    if (zDelta == 0)
+        return TRUE;
+
+    const int direction = zDelta > 0 ? -1 : 1;
+
+    const int amount =
+        MaxInt(
+            1,
+            std::abs(static_cast<int>(zDelta)) /
+            WHEEL_DELTA);
+
+    ScrollTo(
+        m_scrollY + direction * amount * 80);
+
+    return TRUE;
+}
+
+// 설비 상태 수신
+void CEquipmentMonitorPage::ApplyStatus(
+    int equipment,
+    const CString& status,
+    const CString& level,
+    const CString& detail)
+{
+    if (equipment < 0 ||
+        equipment >= 8 ||
+        status.IsEmpty())
+        return;
+
+    if (level != _T("INFO") &&
+        level != _T("WARN") &&
+        level != _T("ERROR"))
+        return;
+
+    m_lastReceived.SetWindowText(
+        CString(_T("최근 수신: ")) +
+        CTime::GetCurrentTime().Format(
+            _T("%Y-%m-%d %H:%M:%S")));
+
+    // 동일 상태는 중복 기록하지 않음
+    if (m_states[equipment] == status)
+        return;
+
+    CString transition =
+        m_states[equipment] +
+        _T(" → ") + status;
+
+    m_states[equipment] = status;
+
+    m_cards[equipment].SetText(
+        CString(Names[equipment]) +
+        _T("\r\n") + status);
+
+    m_events.push_front(
+        {
+            CTime::GetCurrentTime().Format(
+                _T("%Y-%m-%d %H:%M:%S")),
+            Names[equipment],
+            level,
+            transition + _T(" | ") + detail
+        });
+
+    if (m_events.size() > MaxEvents)
+        m_events.pop_back();
+
+    RefreshLog();
+}
+
+// 이벤트 로그 갱신
+void CEquipmentMonitorPage::RefreshLog()
+{
+    CString equipment;
+    CString level;
+
+    m_equipmentFilter.GetWindowText(equipment);
+    m_levelFilter.GetWindowText(level);
+
+    m_log.SetRedraw(FALSE);
+    m_log.DeleteAllItems();
+
+    for (const auto& event : m_events)
+    {
+        if (equipment != _T("전체") &&
+            equipment != event.equipment)
+            continue;
+
+        if (level != _T("전체") &&
+            level != event.level)
+            continue;
+
+        const int row =
+            m_log.InsertItem(
+                m_log.GetItemCount(),
+                event.time);
+
+        m_log.SetItemText(
+            row, 1, event.equipment);
+
+        m_log.SetItemText(
+            row, 2, event.level);
+
+        m_log.SetItemText(
+            row, 3, event.detail);
+    }
+
+    m_log.SetRedraw(TRUE);
+    m_log.Invalidate();
+
+    CString count;
+    count.Format(
+        _T("조회 %d건 / 보관 %u건 (최대 1,000건)"),
+        m_log.GetItemCount(),
+        static_cast<unsigned>(m_events.size()));
+
+    m_count.SetWindowText(count);
+}
+
+void CEquipmentMonitorPage::OnFilterChanged()
+{
+    RefreshLog();
+}
+
+// 이벤트 로그 색상
+void CEquipmentMonitorPage::OnLogCustomDraw(
+    NMHDR* header,
+    LRESULT* result)
+{
+    auto* draw =
+        reinterpret_cast<NMLVCUSTOMDRAW*>(header);
+
+    *result = CDRF_DODEFAULT;
+
+    if (draw->nmcd.dwDrawStage == CDDS_PREPAINT)
+    {
+        *result = CDRF_NOTIFYITEMDRAW;
+    }
+    else if (
+        draw->nmcd.dwDrawStage ==
+        CDDS_ITEMPREPAINT)
+    {
+        const int row =
+            static_cast<int>(draw->nmcd.dwItemSpec);
+
+        const CString level =
+            m_log.GetItemText(row, 2);
+
+        if (level == _T("ERROR"))
+        {
+            draw->clrText = RGB(185, 28, 28);
+            draw->clrTextBk = RGB(254, 242, 242);
+        }
+        else if (level == _T("WARN"))
+        {
+            draw->clrText = RGB(154, 74, 0);
+            draw->clrTextBk = RGB(255, 247, 237);
+        }
+        else
+        {
+            draw->clrText = Navy;
+            draw->clrTextBk = White;
+        }
+    }
+}
+
+// 로그 더블클릭 상세 조회
+void CEquipmentMonitorPage::OnLogDoubleClick(
+    NMHDR* header,
+    LRESULT* result)
+{
+    *result = 0;
+
+    const auto* action =
+        reinterpret_cast<NMITEMACTIVATE*>(header);
+
+    const int row = action->iItem;
+
+    if (row < 0 || row >= m_log.GetItemCount())
+        return;
+
+    CString message;
+
+    message.Format(
+        _T("시간: %s\r\n")
+        _T("설비: %s\r\n")
+        _T("등급: %s\r\n\r\n")
+        _T("이벤트 내용\r\n%s"),
+        m_log.GetItemText(row, 0).GetString(),
+        m_log.GetItemText(row, 1).GetString(),
+        m_log.GetItemText(row, 2).GetString(),
+        m_log.GetItemText(row, 3).GetString());
+
+    MessageBox(
+        message,
+        _T("이벤트 로그 상세"),
+        MB_OK | MB_ICONINFORMATION);
+}
+
+// 기존 가상 상황 테스트
+void CEquipmentMonitorPage::OnApplyScenario()
+{
+    const CString info = _T("INFO");
+    const CString warning = _T("WARN");
+    const CString error = _T("ERROR");
+
+    const int scenario = m_scenario.GetCurSel();
+
+    if (scenario == 0 || scenario == 6)
+    {
+        const LPCTSTR states[] =
+        {
+            _T("정지"),
+            _T("대기"),
+            _T("대기"),
+            _T("원점"),
+            _T("연결"),
+            _T("연결"),
+            _T("대기"),
+            _T("수동")
+        };
+
+        for (int i = 0; i < 8; ++i)
+        {
+            ApplyStatus(
+                i,
+                states[i],
+                info,
+                _T("가상 연결 / 정지 상태 적용"));
+        }
+
+        return;
+    }
+
+    if (scenario >= 1 && scenario <= 3 &&
+        (m_states[5] != _T("연결") ||
+            m_states[1] == _T("오류")))
+    {
+        AfxMessageBox(
+            _T("먼저 연결 / 대기 또는 ")
+            _T("정상 복구 / 정지를 적용하세요."));
+        return;
+    }
+
+    switch (scenario)
+    {
+    case 1:
+        ApplyStatus(
+            7, _T("자동"), info,
+            _T("가상 자동 모드 전환"));
+
+        ApplyStatus(
+            0, _T("운전"), info,
+            _T("가상 컨베이어 시작"));
+
+        ApplyStatus(
+            1, _T("촬영 준비"), info,
+            _T("가상 검사 준비"));
+        break;
+
+    case 2:
+        ApplyStatus(
+            2,
+            m_states[2] == _T("RECHECK")
+            ? _T("대기")
+            : _T("RECHECK"),
+            info,
+            _T("가상 검사 재확인 상태 전환"));
+        break;
+
+    case 3:
+        ApplyStatus(
+            3,
+            m_states[3] == _T("배출")
+            ? _T("원점")
+            : _T("배출"),
+            warning,
+            _T("가상 서보 배출 / 원점 전환"));
+
+        ApplyStatus(
+            6,
+            _T("불량 안내"),
+            warning,
+            _T("가상 불량 LED / 부저 상태"));
+        break;
+
+    case 4:
+        ApplyStatus(
+            1,
+            _T("오류"),
+            error,
+            _T("가상 영상 수신 실패"));
+
+        ApplyStatus(
+            0,
+            _T("정지"),
+            warning,
+            _T("카메라 오류에 따른 가상 정지"));
+        break;
+
+    case 5:
+        ApplyStatus(
+            5,
+            _T("끊김"),
+            error,
+            _T("가상 TCP 연결 끊김"));
+
+        for (int i = 0; i < 8; ++i)
+        {
+            if (i != 5)
+            {
+                ApplyStatus(
+                    i,
+                    _T("확인 불가"),
+                    warning,
+                    _T("통신 단절로 실제 상태 확인 불가"));
+            }
+        }
+        break;
+    }
+}

@@ -1,0 +1,1253 @@
+using System;
+using System.Drawing;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using TireEquipmentHMI.Theme;
+
+namespace TireEquipmentHMI.Pages;
+
+public sealed class ChatPage : UserControl
+{
+    private static string ServerAddress => AppConfig.Current.ServerIp;
+    private static int ServerPort => AppConfig.Current.ServerPort;
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    public event Action? HeartbeatReceived;
+    // Dashboard statistics contain ONLY data_source=HARDWARE rows on updated server.
+    public event Action<string>? RealInspectionHistoryReceived;
+
+    private readonly string userName;
+    private readonly string role;
+
+    private readonly SemaphoreSlim sendLock = new(1, 1);
+
+    private readonly Label connectionStatus = new();
+    private readonly Label userBadge = new();
+
+    private readonly FlowLayoutPanel messageFlow = new();
+
+    private readonly TextBox messageBox = new();
+    private readonly Button sendButton = new();
+    private readonly Button reconnectButton = new();
+
+    private TcpClient? client;
+    private StreamReader? reader;
+    private StreamWriter? writer;
+
+    private CancellationTokenSource? connectionCancellation;
+
+    private bool connectStarted;
+    private bool disposed;
+    private int loadedHistoryCount;
+
+    public ChatPage(string userName, string role)
+    {
+        this.userName = userName;
+        this.role = role;
+
+        Dock = DockStyle.Fill;
+        BackColor = UiTheme.PageBg;
+
+        BuildLayout();
+    }
+
+    public void StartConnection()
+    {
+        if (connectStarted)
+            return;
+
+        connectStarted = true;
+
+        _ = ConnectAsync();
+    }
+
+    private void BuildLayout()
+    {
+        SuspendLayout();
+
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 3,
+            BackColor = UiTheme.PageBg,
+            Padding = new Padding(22, 18, 22, 18)
+        };
+
+        root.RowStyles.Add(
+            new RowStyle(
+                SizeType.Absolute,
+                62));
+
+        root.RowStyles.Add(
+            new RowStyle(
+                SizeType.Percent,
+                100));
+
+        root.RowStyles.Add(
+            new RowStyle(
+                SizeType.Absolute,
+                96));
+
+        root.Controls.Add(
+            BuildHeader(),
+            0,
+            0);
+
+        root.Controls.Add(
+            BuildChatArea(),
+            0,
+            1);
+
+        root.Controls.Add(
+            BuildInputArea(),
+            0,
+            2);
+
+        Controls.Add(root);
+
+        ResumeLayout();
+    }
+
+    private Control BuildHeader()
+    {
+        var card = new ModernCardPanel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 0, 12)
+        };
+
+        var title = new Label
+        {
+            Text = "채팅 · 인수인계",
+            AutoSize = true,
+            Location = new Point(24, 15),
+            ForeColor = UiTheme.Text,
+            Font = new Font(
+                "맑은 고딕",
+                11F,
+                FontStyle.Bold)
+        };
+
+        var description = new Label
+        {
+            Text =
+                "",
+            AutoSize = true,
+            Location = new Point(25, 53),
+            ForeColor = UiTheme.Muted,
+            Font = new Font(
+                "맑은 고딕",
+                9F)
+        };
+
+        userBadge.Text =
+            $"{GetRoleName(role)}  ·  {userName}";
+
+        userBadge.AutoSize = false;
+        userBadge.Size = new Size(190, 32);
+        userBadge.TextAlign =
+            ContentAlignment.MiddleCenter;
+
+        userBadge.BackColor =
+            UiTheme.AccentSoft;
+
+        userBadge.ForeColor =
+            UiTheme.AccentDark;
+
+        userBadge.Font =
+            new Font(
+                "맑은 고딕",
+                9F,
+                FontStyle.Bold);
+
+        userBadge.Anchor =
+            AnchorStyles.Top |
+            AnchorStyles.Right;
+
+        connectionStatus.Text =
+            "● 서버 연결 확인 중";
+
+        connectionStatus.AutoSize = false;
+        connectionStatus.Size =
+            new Size(245, 30);
+
+        connectionStatus.TextAlign =
+            ContentAlignment.MiddleRight;
+
+        connectionStatus.ForeColor =
+            UiTheme.Muted;
+
+        connectionStatus.Font =
+            new Font(
+                "맑은 고딕",
+                9F,
+                FontStyle.Bold);
+
+        connectionStatus.Anchor =
+            AnchorStyles.Top |
+            AnchorStyles.Right;
+
+        reconnectButton.Text =
+            "재연결";
+
+        reconnectButton.Size =
+            new Size(88, 34);
+
+        reconnectButton.FlatStyle =
+            FlatStyle.Flat;
+
+        reconnectButton.FlatAppearance.BorderColor =
+            UiTheme.Border;
+
+        reconnectButton.BackColor =
+            Color.White;
+
+        reconnectButton.ForeColor =
+            UiTheme.Text;
+
+        reconnectButton.Font =
+            new Font(
+                "맑은 고딕",
+                9F,
+                FontStyle.Bold);
+
+        reconnectButton.Cursor =
+            Cursors.Hand;
+
+        reconnectButton.Anchor =
+            AnchorStyles.Top |
+            AnchorStyles.Right;
+
+        reconnectButton.Click +=
+            async (_, _) =>
+                await ConnectAsync();
+
+        card.Controls.Add(title);
+        card.Controls.Add(description);
+        card.Controls.Add(userBadge);
+        card.Controls.Add(connectionStatus);
+        card.Controls.Add(reconnectButton);
+
+        void Reposition()
+        {
+            reconnectButton.Location =
+                new Point(
+                    card.ClientSize.Width -
+                    reconnectButton.Width -
+                    22,
+                    13);
+
+            connectionStatus.Location =
+                new Point(
+                    reconnectButton.Left -
+                    connectionStatus.Width -
+                    12,
+                    15);
+
+            userBadge.Location = new Point(90, 14);
+        }
+
+        card.Resize += (_, _) =>
+            Reposition();
+
+        Reposition();
+
+        return card;
+    }
+
+    private Control BuildChatArea()
+    {
+        var card = new ModernCardPanel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 0, 0, 12),
+            Padding = new Padding(14)
+        };
+
+        var topLine = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = 40,
+            BackColor = Color.Transparent
+        };
+
+        var channelLabel = new Label
+        {
+            Text = "대화",
+            AutoSize = true,
+            Location = new Point(8, 8),
+            ForeColor = UiTheme.Text,
+            Font = new Font(
+                "맑은 고딕",
+                10F,
+                FontStyle.Bold)
+        };
+
+        var infoLabel = new Label
+        {
+            Text = "",
+            AutoSize = true,
+            ForeColor = UiTheme.Muted,
+            Font = new Font(
+                "맑은 고딕",
+                8.5F),
+            Anchor =
+                AnchorStyles.Top |
+                AnchorStyles.Right
+        };
+
+        topLine.Controls.Add(channelLabel);
+        topLine.Controls.Add(infoLabel);
+
+        topLine.Resize += (_, _) =>
+        {
+            infoLabel.Location =
+                new Point(
+                    topLine.ClientSize.Width -
+                    infoLabel.Width -
+                    8,
+                    10);
+        };
+
+        messageFlow.Dock =
+            DockStyle.Fill;
+
+        messageFlow.FlowDirection =
+            FlowDirection.TopDown;
+
+        messageFlow.WrapContents =
+            false;
+
+        messageFlow.AutoScroll =
+            true;
+
+        messageFlow.BackColor =
+            Color.White;
+
+        messageFlow.Padding =
+            new Padding(10);
+
+        messageFlow.SizeChanged +=
+            (_, _) => ReflowMessages();
+
+        card.Controls.Add(messageFlow);
+        card.Controls.Add(topLine);
+
+        return card;
+    }
+
+    private Control BuildInputArea()
+    {
+        var card = new ModernCardPanel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0),
+            Padding = new Padding(18, 14, 18, 14)
+        };
+
+        var inputLabel = new Label
+        {
+            Text = "메시지",
+            AutoSize = true,
+            Location = new Point(18, 12),
+            ForeColor = UiTheme.Muted,
+            Font = new Font(
+                "맑은 고딕",
+                8.5F,
+                FontStyle.Bold)
+        };
+
+        messageBox.Multiline = true;
+        messageBox.AcceptsReturn = true;
+        messageBox.ScrollBars =
+            ScrollBars.Vertical;
+
+        messageBox.BorderStyle =
+            BorderStyle.FixedSingle;
+
+        messageBox.Font =
+            new Font(
+                "맑은 고딕",
+                10F);
+
+        messageBox.PlaceholderText =
+            "메시지를 입력하세요.  Enter 전송 / Shift + Enter 줄바꿈";
+
+        messageBox.Location =
+            new Point(18, 38);
+
+        messageBox.Anchor =
+            AnchorStyles.Left |
+            AnchorStyles.Right |
+            AnchorStyles.Top;
+
+        messageBox.Height = 48;
+
+        messageBox.KeyDown +=
+            MessageBox_KeyDown;
+
+        sendButton.Text =
+            "전송";
+
+        sendButton.Size =
+            new Size(110, 48);
+
+        sendButton.Anchor =
+            AnchorStyles.Top |
+            AnchorStyles.Right;
+
+        sendButton.FlatStyle =
+            FlatStyle.Flat;
+
+        sendButton.FlatAppearance.BorderSize =
+            0;
+
+        sendButton.BackColor =
+            UiTheme.Accent;
+
+        sendButton.ForeColor =
+            Color.White;
+
+        sendButton.Font =
+            new Font(
+                "맑은 고딕",
+                10F,
+                FontStyle.Bold);
+
+        sendButton.Cursor =
+            Cursors.Hand;
+
+        sendButton.Enabled =
+            false;
+
+        sendButton.Click +=
+            async (_, _) =>
+                await SendCurrentMessageAsync();
+
+        card.Controls.Add(inputLabel);
+        card.Controls.Add(messageBox);
+        card.Controls.Add(sendButton);
+
+        void Reposition()
+        {
+            sendButton.Location =
+                new Point(
+                    card.ClientSize.Width -
+                    sendButton.Width -
+                    18,
+                    38);
+
+            messageBox.Width =
+                Math.Max(
+                    250,
+                    sendButton.Left -
+                    messageBox.Left -
+                    14);
+        }
+
+        card.Resize += (_, _) =>
+            Reposition();
+
+        Reposition();
+
+        return card;
+    }
+
+    private async Task ConnectAsync()
+    {
+        reconnectButton.Enabled = false;
+
+        SetConnectionState(
+            false,
+            "● 중앙 서버 연결 중...");
+
+        await DisconnectAsync();
+
+        try
+        {
+            var newClient =
+                new TcpClient();
+
+            using var timeout =
+                new CancellationTokenSource(
+                    TimeSpan.FromSeconds(5));
+
+            await newClient.ConnectAsync(
+                ServerAddress,
+                ServerPort,
+                timeout.Token);
+
+            NetworkStream stream =
+                newClient.GetStream();
+
+            var newReader =
+                new StreamReader(
+                    stream,
+                    new UTF8Encoding(false),
+                    false,
+                    1024,
+                    true);
+
+            var newWriter =
+                new StreamWriter(
+                    stream,
+                    new UTF8Encoding(false),
+                    1024,
+                    true)
+                {
+                    AutoFlush = true,
+                    NewLine = "\n"
+                };
+
+            client = newClient;
+            reader = newReader;
+            writer = newWriter;
+
+            connectionCancellation =
+                new CancellationTokenSource();
+
+            SetConnectionState(
+                true,
+                "● 서버 연결됨");
+
+            ClearMessages();
+            loadedHistoryCount = 0;
+
+            _ = ReceiveLoopAsync(
+                newClient,
+                newReader,
+                connectionCancellation.Token);
+
+            await RequestChatHistoryAsync(
+                newWriter);
+
+            await RequestRealInspectionHistoryAsync();
+
+            messageBox.Focus();
+        }
+        catch (OperationCanceledException)
+        {
+            SetConnectionState(
+                false,
+                "● 서버 연결 시간 초과");
+
+            AddSystemMessage(
+                "중앙 서버 연결 시간이 초과되었습니다.");
+        }
+        catch (Exception ex)
+        {
+            SetConnectionState(
+                false,
+                "● 서버 연결 실패");
+
+            AddSystemMessage(
+                $"연결 오류: {ex.Message}");
+        }
+        finally
+        {
+            reconnectButton.Enabled = true;
+        }
+    }
+
+    private async void MessageBox_KeyDown(
+        object? sender,
+        KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.Enter ||
+            e.Shift)
+        {
+            return;
+        }
+
+        e.SuppressKeyPress = true;
+
+        await SendCurrentMessageAsync();
+    }
+
+    private async Task SendCurrentMessageAsync()
+    {
+        string message =
+            messageBox.Text.Trim();
+
+        if (message.Length == 0)
+            return;
+
+        StreamWriter? activeWriter =
+            writer;
+
+        if (client?.Connected != true ||
+            activeWriter is null)
+        {
+            SetConnectionState(
+                false,
+                "● 서버 미연결 · 재연결 필요");
+
+            AddSystemMessage(
+                "서버에 연결되어 있지 않습니다.");
+
+            return;
+        }
+
+        string json =
+            JsonSerializer.Serialize(
+                new
+                {
+                    type = "CHAT",
+                    user_name = userName,
+                    role,
+                    message
+                },
+                JsonOptions);
+
+        try
+        {
+            await sendLock.WaitAsync();
+
+            try
+            {
+                await activeWriter.WriteLineAsync(
+                    json);
+            }
+            finally
+            {
+                sendLock.Release();
+            }
+
+            messageBox.Clear();
+            messageBox.Focus();
+        }
+        catch (Exception ex)
+        {
+            AddSystemMessage(
+                $"전송 오류: {ex.Message}");
+
+            SetConnectionState(
+                false,
+                "● 메시지 전송 실패");
+
+            await DisconnectAsync();
+        }
+    }
+
+    private async Task ReceiveLoopAsync(
+        TcpClient activeClient,
+        StreamReader activeReader,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                string? line =
+                    await activeReader.ReadLineAsync(
+                        cancellationToken);
+
+                if (line is null)
+                    break;
+
+                ProcessServerMessage(line);
+            }
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+            when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            AddSystemMessage(
+                $"수신 오류: {ex.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(
+                    client,
+                    activeClient))
+            {
+                await DisconnectAsync(
+                    activeClient);
+
+                if (!disposed)
+                {
+                    SetConnectionState(
+                        false,
+                        "● 서버 연결 끊김");
+                }
+            }
+        }
+    }
+
+    public async Task RequestRealInspectionHistoryAsync()
+    {
+        var activeWriter = writer;
+        if (client?.Connected != true || activeWriter is null) return;
+        await sendLock.WaitAsync();
+        try { await activeWriter.WriteLineAsync("{\"type\":\"DASHBOARD_STATS\"}"); }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex.Message); }
+        finally { sendLock.Release(); }
+    }
+
+    private void ProcessServerMessage(
+        string line)
+    {
+        try
+        {
+            using JsonDocument document =
+                JsonDocument.Parse(line);
+
+            JsonElement root =
+                document.RootElement;
+
+            if (!root.TryGetProperty(
+                    "type",
+                    out JsonElement typeElement))
+            {
+                return;
+            }
+
+            string type =
+                typeElement.GetString() ?? "";
+
+            if (type.Equals("HEARTBEAT", StringComparison.OrdinalIgnoreCase))
+            {
+                HeartbeatReceived?.Invoke();
+                return;
+            }
+
+            if (string.Equals(type, "DASHBOARD_STATS_RESULT", StringComparison.OrdinalIgnoreCase))
+            {
+                if (root.TryGetProperty("recent", out var recent))
+                    RealInspectionHistoryReceived?.Invoke(recent.GetString() ?? "");
+                return;
+            }
+            if (string.Equals(type, "INSPECTION", StringComparison.OrdinalIgnoreCase))
+            {
+                if (root.TryGetProperty("data_source", out var source) && source.GetString() == "HARDWARE")
+                    _ = RequestRealInspectionHistoryAsync();
+                return;
+            }
+
+            if (string.Equals(
+                    type,
+                    "CHAT_HISTORY_END",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                loadedHistoryCount = 0;
+                return;
+            }
+
+            if (!string.Equals(
+                    type,
+                    "CHAT",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            string receivedUser =
+                root.TryGetProperty(
+                    "user_name",
+                    out JsonElement userElement)
+                    ? userElement.GetString()
+                        ?? "알 수 없음"
+                    : "알 수 없음";
+
+            string receivedRole =
+                root.TryGetProperty(
+                    "role",
+                    out JsonElement roleElement)
+                    ? roleElement.GetString()
+                        ?? string.Empty
+                    : string.Empty;
+
+            string receivedMessage =
+                root.TryGetProperty(
+                    "message",
+                    out JsonElement messageElement)
+                    ? messageElement.GetString()
+                        ?? string.Empty
+                    : string.Empty;
+
+            bool isHistory =
+                root.TryGetProperty(
+                    "history",
+                    out JsonElement historyElement) &&
+                historyElement.ValueKind ==
+                    JsonValueKind.True;
+
+            string displayTime =
+                DateTime.Now.ToString(
+                    "HH:mm:ss");
+
+            if (root.TryGetProperty(
+                    "created_at",
+                    out JsonElement createdElement))
+            {
+                string? createdAt =
+                    createdElement.GetString();
+
+                if (DateTime.TryParse(
+                        createdAt,
+                        out DateTime parsed))
+                {
+                    displayTime =
+                        isHistory
+                            ? parsed.ToString(
+                                "MM-dd HH:mm")
+                            : parsed.ToString(
+                                "HH:mm:ss");
+                }
+            }
+
+            if (isHistory)
+                loadedHistoryCount++;
+
+            AddChatMessage(
+                displayTime,
+                GetRoleName(receivedRole),
+                receivedUser,
+                receivedMessage,
+                receivedUser == userName);
+        }
+        catch (JsonException)
+        {
+            AddSystemMessage(
+                "잘못된 채팅 데이터가 수신되었습니다.");
+        }
+    }
+
+    private async Task RequestChatHistoryAsync(
+        StreamWriter activeWriter)
+    {
+        string request =
+            JsonSerializer.Serialize(
+                new
+                {
+                    type = "CHAT_HISTORY"
+                },
+                JsonOptions);
+
+        await sendLock.WaitAsync();
+
+        try
+        {
+            await activeWriter.WriteLineAsync(
+                request);
+        }
+        finally
+        {
+            sendLock.Release();
+        }
+    }
+
+    private void ClearMessages()
+    {
+        RunOnUiThread(() =>
+        {
+            foreach (Control control
+                     in messageFlow.Controls)
+            {
+                control.Dispose();
+            }
+
+            messageFlow.Controls.Clear();
+        });
+    }
+
+    private void AddChatMessage(
+        string time,
+        string roleName,
+        string sender,
+        string message,
+        bool isMine)
+    {
+        RunOnUiThread(() =>
+        {
+            int availableWidth =
+                Math.Max(
+                    250,
+                    messageFlow.ClientSize.Width - 40);
+
+            int maxBubbleWidth =
+                Math.Min(
+                    620,
+                    (int)(availableWidth * 0.72));
+
+            var messageFont =
+                new Font(
+                    "맑은 고딕",
+                    10F);
+
+            Size measured =
+                TextRenderer.MeasureText(
+                    message,
+                    messageFont,
+                    new Size(
+                        maxBubbleWidth - 30,
+                        int.MaxValue),
+                    TextFormatFlags.WordBreak |
+                    TextFormatFlags.TextBoxControl);
+
+            int bubbleWidth =
+                Math.Min(
+                    maxBubbleWidth,
+                    Math.Max(
+                        150,
+                        measured.Width + 34));
+
+            int messageHeight =
+                Math.Max(
+                    24,
+                    measured.Height + 6);
+
+            var wrapper =
+                new Panel
+                {
+                    Width = availableWidth,
+                    Height = messageHeight + 50,
+                    Margin = new Padding(
+                        0,
+                        4,
+                        0,
+                        5),
+                    BackColor =
+                        Color.Transparent,
+                    Tag = isMine
+                };
+
+            var bubble =
+                new Panel
+                {
+                    Width = bubbleWidth,
+                    Height = messageHeight + 42,
+                    BackColor =
+                        isMine
+                            ? UiTheme.AccentSoft
+                            : Color.FromArgb(
+                                248,
+                                250,
+                                252)
+                };
+
+            var senderLabel =
+                new Label
+                {
+                    Text =
+                        $"{roleName}  ·  {sender}     {time}",
+                    AutoSize = false,
+                    Location =
+                        new Point(
+                            14,
+                            8),
+                    Size =
+                        new Size(
+                            bubbleWidth - 28,
+                            20),
+                    ForeColor =
+                        isMine
+                            ? UiTheme.AccentDark
+                            : UiTheme.Muted,
+                    Font =
+                        new Font(
+                            "맑은 고딕",
+                            8.5F,
+                            FontStyle.Bold)
+                };
+
+            var messageLabel =
+                new Label
+                {
+                    Text = message,
+                    AutoSize = false,
+                    Location =
+                        new Point(
+                            14,
+                            28),
+                    Size =
+                        new Size(
+                            bubbleWidth - 28,
+                            messageHeight),
+                    ForeColor =
+                        UiTheme.Text,
+                    Font = messageFont
+                };
+
+            bubble.Controls.Add(
+                senderLabel);
+
+            bubble.Controls.Add(
+                messageLabel);
+
+            wrapper.Controls.Add(
+                bubble);
+
+            messageFlow.Controls.Add(
+                wrapper);
+
+            PositionBubble(
+                wrapper,
+                bubble,
+                isMine);
+
+            messageFlow.ScrollControlIntoView(
+                wrapper);
+        });
+    }
+
+    private void AddSystemMessage(
+        string message)
+    {
+        RunOnUiThread(() =>
+        {
+            int width =
+                Math.Max(
+                    250,
+                    messageFlow.ClientSize.Width - 40);
+
+            var wrapper =
+                new Panel
+                {
+                    Width = width,
+                    Height = 44,
+                    Margin =
+                        new Padding(
+                            0,
+                            4,
+                            0,
+                            4),
+                    BackColor =
+                        Color.Transparent,
+                    Tag = "SYSTEM"
+                };
+
+            var label =
+                new Label
+                {
+                    Text =
+                        $"{DateTime.Now:HH:mm:ss}   {message}",
+                    AutoSize = false,
+                    Size =
+                        new Size(
+                            Math.Min(
+                                520,
+                                width - 20),
+                            30),
+                    TextAlign =
+                        ContentAlignment.MiddleCenter,
+                    ForeColor =
+                        UiTheme.Muted,
+                    BackColor =
+                        Color.FromArgb(
+                            248,
+                            250,
+                            252),
+                    Font =
+                        new Font(
+                            "맑은 고딕",
+                            8.5F)
+                };
+
+            label.Left =
+                (wrapper.Width -
+                 label.Width) / 2;
+
+            label.Top = 5;
+
+            wrapper.Controls.Add(
+                label);
+
+            messageFlow.Controls.Add(
+                wrapper);
+
+            messageFlow.ScrollControlIntoView(
+                wrapper);
+        });
+    }
+
+    private void ReflowMessages()
+    {
+        if (messageFlow.ClientSize.Width <= 0)
+            return;
+
+        int width =
+            Math.Max(
+                500,
+                messageFlow.ClientSize.Width - 40);
+
+        foreach (Control control
+                 in messageFlow.Controls)
+        {
+            if (control is not Panel wrapper)
+                continue;
+
+            wrapper.Width = width;
+
+            if (wrapper.Tag is bool isMine &&
+                wrapper.Controls.Count > 0)
+            {
+                PositionBubble(
+                    wrapper,
+                    wrapper.Controls[0],
+                    isMine);
+            }
+            else if (
+                wrapper.Tag is string tag &&
+                tag == "SYSTEM" &&
+                wrapper.Controls.Count > 0)
+            {
+                Control content =
+                    wrapper.Controls[0];
+
+                content.Left =
+                    Math.Max(
+                        0,
+                        (wrapper.Width -
+                         content.Width) / 2);
+            }
+        }
+    }
+
+    private static void PositionBubble(
+        Panel wrapper,
+        Control bubble,
+        bool isMine)
+    {
+        bubble.Top = 2;
+
+        bubble.Left =
+            isMine
+                ? Math.Max(
+                    0,
+                    wrapper.Width -
+                    bubble.Width -
+                    8)
+                : 8;
+    }
+
+    private void SetConnectionState(
+        bool connected,
+        string text)
+    {
+        RunOnUiThread(() =>
+        {
+            connectionStatus.Text = connected
+                ? "● 서버 연결됨"
+                : "● 서버 미연결";
+
+            connectionStatus.ForeColor =
+                connected
+                    ? UiTheme.Success
+                    : UiTheme.Muted;
+
+            sendButton.Enabled =
+                connected;
+        });
+    }
+
+    private void RunOnUiThread(
+        Action action)
+    {
+        if (IsDisposed ||
+            Disposing)
+        {
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                BeginInvoke(action);
+            }
+            catch (
+                InvalidOperationException)
+            {
+            }
+
+            return;
+        }
+
+        action();
+    }
+
+    private Task DisconnectAsync(
+        TcpClient? expectedClient = null)
+    {
+        if (expectedClient is not null &&
+            !ReferenceEquals(
+                client,
+                expectedClient))
+        {
+            return Task.CompletedTask;
+        }
+
+        connectionCancellation?.Cancel();
+        connectionCancellation?.Dispose();
+
+        connectionCancellation = null;
+
+        reader?.Dispose();
+        writer?.Dispose();
+        client?.Dispose();
+
+        reader = null;
+        writer = null;
+        client = null;
+
+        if (!disposed)
+        {
+            RunOnUiThread(() =>
+                sendButton.Enabled = false);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    protected override void Dispose(
+        bool disposing)
+    {
+        if (disposing)
+        {
+            disposed = true;
+
+            DisconnectAsync()
+                .GetAwaiter()
+                .GetResult();
+
+            sendLock.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private static string GetRoleName(
+        string role)
+    {
+        return role switch
+        {
+            "ADMIN" =>
+                "관리자",
+
+            "OPERATOR" =>
+                "현장 작업자",
+
+            _ =>
+                string.IsNullOrWhiteSpace(role)
+                    ? "-"
+                    : role
+        };
+    }
+}

@@ -1,0 +1,85 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+  <ItemGroup>
+    <Filter Include="Pages">
+      <UniqueIdentifier>{E5E53042-A78D-421C-9A85-D3A6D7B7C118}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Theme">
+      <UniqueIdentifier>{A1D52B53-8E31-4C23-9C5B-08D6E86F4E72}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Pages\DashboardPage.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\InspectionHistoryPage.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\EquipmentMonitorPage.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\StatisticsPage.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\ChatHandoverPage.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\HandoverRegisterDialog.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\HandoverTypes.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\HandoverMergeSupport.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Pages\DailyReportPage.h">
+      <Filter>Pages</Filter>
+    </ClInclude>
+    <ClInclude Include="Theme\ThemeControls.h">
+      <Filter>Theme</Filter>
+    </ClInclude>
+    <ClInclude Include="TireClientSocket.h" />
+    <ClInclude Include="framework.h" />
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="TireProductionMFC.h" />
+    <ClInclude Include="MainFrame.h" />
+    <ClInclude Include="BasePage.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Pages\DashboardPage.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Pages\InspectionHistoryPage.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Pages\EquipmentMonitorPage.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Pages\StatisticsPage.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Pages\ChatHandoverPage.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Pages\HandoverRegisterDialog.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Pages\HandoverMergeSupport.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Pages\DailyReportPage.cpp">
+      <Filter>Pages</Filter>
+    </ClCompile>
+    <ClCompile Include="Theme\ThemeControls.cpp">
+      <Filter>Theme</Filter>
+    </ClCompile>
+    <ClCompile Include="TireClientSocket.cpp" />
+    <ClCompile Include="pch.cpp" />
+    <ClCompile Include="TireProductionMFC.cpp" />
+    <ClCompile Include="MainFrame.cpp" />
+    <ClCompile Include="BasePage.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\winforms\program.cs" />
+  </ItemGroup>
+</Project>

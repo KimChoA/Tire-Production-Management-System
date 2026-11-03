@@ -1,0 +1,4 @@
+{
+  "Port": 5000,
+  "DatabasePath": "C:\\sqlite\\production.db"
+}

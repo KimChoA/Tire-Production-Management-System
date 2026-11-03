@@ -1,0 +1,110 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>MFCProj</Keyword>
+    <ProjectGuid>{9C6D4DA8-1C20-4A67-A5FB-7E7D9C7E8E11}</ProjectGuid>
+    <RootNamespace>TireProductionMFC</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseOfMfc>Dynamic</UseOfMfc>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseOfMfc>false</UseOfMfc>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ResolvedMfcRoot Condition="Exists('$(VCToolsInstallDir)atlmfc\lib\x64\uafxcw.lib')">$(VCToolsInstallDir)atlmfc</ResolvedMfcRoot>
+    <ResolvedMfcRoot Condition="'$(ResolvedMfcRoot)'=='' and Exists('$(VCInstallDir)Tools\MSVC\14.30.30705\atlmfc\lib\x64\uafxcw.lib')">$(VCInstallDir)Tools\MSVC\14.30.30705\atlmfc</ResolvedMfcRoot>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <AdditionalIncludeDirectories>$(ResolvedMfcRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(ResolvedMfcRoot)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>uafxcw.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <EntryPointSymbol>wWinMainCRTStartup</EntryPointSymbol>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="framework.h" />
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="TireProductionMFC.h" />
+    <ClInclude Include="MainFrame.h" />
+    <ClInclude Include="BasePage.h" />
+    <ClInclude Include="Theme\ThemeControls.h" />
+    <ClInclude Include="Pages\DashboardPage.h" />
+    <ClInclude Include="Pages\InspectionHistoryPage.h" />
+    <ClInclude Include="Pages\EquipmentMonitorPage.h" />
+    <ClInclude Include="Pages\StatisticsPage.h" />
+    <ClInclude Include="Pages\ChatHandoverPage.h" />
+    <ClInclude Include="Pages\HandoverRegisterDialog.h" />
+    <ClInclude Include="Pages\HandoverTypes.h" />
+    <ClInclude Include="Pages\HandoverMergeSupport.h" />
+    <ClInclude Include="Pages\DailyReportPage.h" />
+    <ClInclude Include="TireClientSocket.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="TireProductionMFC.cpp" />
+    <ClCompile Include="MainFrame.cpp" />
+    <ClCompile Include="BasePage.cpp" />
+    <ClCompile Include="Theme\ThemeControls.cpp" />
+    <ClCompile Include="Pages\DashboardPage.cpp" />
+    <ClCompile Include="Pages\InspectionHistoryPage.cpp" />
+    <ClCompile Include="Pages\EquipmentMonitorPage.cpp" />
+    <ClCompile Include="Pages\StatisticsPage.cpp" />
+    <ClCompile Include="Pages\ChatHandoverPage.cpp" />
+    <ClCompile Include="Pages\HandoverRegisterDialog.cpp" />
+    <ClCompile Include="Pages\HandoverMergeSupport.cpp" />
+    <ClCompile Include="Pages\DailyReportPage.cpp">
+      <PrecompiledHeaderFile>../pch.h</PrecompiledHeaderFile>
+    </ClCompile>
+    <ClCompile Include="TireClientSocket.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\winforms\program.cs" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

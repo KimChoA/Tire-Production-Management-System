@@ -1,0 +1,2 @@
+flask>=3.0,<4
+# Install OpenCV via Raspberry Pi OS apt (python3-opencv) or your existing venv
